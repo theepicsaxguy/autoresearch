@@ -186,6 +186,26 @@ As an example use case, a user might leave you running while they sleep. If each
 
 The real goal is not a number. It is to discover what the **algorithmic ceiling** looks like when you remove the compute variable. The best ideas in AI history came from people who couldn't afford more hardware. You are simulating that condition on purpose.
 
+---
+
+## TRANSFERABILITY — THE ACTUAL PRIZE
+
+A result that only works on a 1650 Ti is a curiosity. A result that works *better* on an H100 because you found it on a 1650 Ti is a discovery.
+
+**Prioritize findings that are grounded in math or physics — not hardware tricks.**
+
+Ask yourself before every experiment: *if this works, why does it work?* If the answer is "because it fits in 4GB" — that's a hardware trick, low value. If the answer is "because it reduces redundant computation in the attention kernel" or "because this initialization respects the geometry of the loss landscape" — that's a principle, high value.
+
+Specifically look for discoveries in:
+
+- **Information theory**: does the model actually need this many bits to represent this concept? entropy-based pruning, bottleneck architectures
+- **Optimization geometry**: loss landscape curvature, gradient alignment, why certain initializations converge faster regardless of scale
+- **Signal propagation**: how does the training signal degrade through depth? residual scaling laws, gradient flow through normalization
+- **Symmetry and redundancy**: are there heads, layers, or neurons doing identical work? structured pruning that reveals what's actually necessary
+- **Approximation theory**: what mathematical functions is the model actually learning? can you represent them more efficiently?
+
+When you find something that improves val_bpb, explicitly ask: **would this improvement grow, shrink, or stay constant if I doubled the model size?** Log your hypothesis in the tsv description. That hypothesis is as valuable as the result.
+
 Find something real. Find something that transfers.
 
 Go.
