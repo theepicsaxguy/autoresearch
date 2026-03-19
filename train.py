@@ -272,7 +272,8 @@ class GPT(nn.Module):
         scalar_lr=0.5,
     ):
         model_dim = self.config.n_embd
-        matrix_params = list(self.transformer.h.parameters())
+        matrix_params = [p for p in self.transformer.h.parameters() if p.ndim >= 2]
+        scalar_params = [p for p in self.transformer.h.parameters() if p.ndim == 0]
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
@@ -280,6 +281,7 @@ class GPT(nn.Module):
         x0_params = [self.x0_lambdas]
         assert len(list(self.parameters())) == (
             len(matrix_params)
+            + len(scalar_params)
             + len(embedding_params)
             + len(lm_head_params)
             + len(value_embeds_params)
@@ -327,6 +329,14 @@ class GPT(nn.Module):
                 params=x0_params,
                 lr=scalar_lr,
                 betas=(0.96, 0.95),
+                eps=1e-10,
+                weight_decay=0.0,
+            ),
+            dict(
+                kind="adamw",
+                params=scalar_params,
+                lr=scalar_lr,
+                betas=adam_betas,
                 eps=1e-10,
                 weight_decay=0.0,
             ),
