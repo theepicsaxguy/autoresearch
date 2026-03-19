@@ -111,13 +111,26 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
+    """Transformer block with speculative shortcut: cheap prediction + learned trust."""
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
+        # Cheap prediction: single linear projection (conceptually parallel to attention)
+        self.cheap_predictor = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        # Learned trust weight: how much to rely on full attention vs cheap prediction
+        self.trust_weight = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+        x_norm = norm(x)
+        # Cheap prediction path (could run in parallel with attention)
+        cheap_pred = self.cheap_predictor(x_norm)
+        # Full attention path
+        attn_out = self.attn(x_norm, ve, cos_sin, window_size)
+        # Learned combination: sigmoid(trust) weights attention vs cheap prediction
+        w = torch.sigmoid(self.trust_weight)
+        x = x + w * attn_out + (1 - w) * cheap_pred
         x = x + self.mlp(norm(x))
         return x
 
@@ -167,6 +180,8 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            torch.nn.init.uniform_(block.cheap_predictor.weight, -s, s)
+            torch.nn.init.zeros_(block.trust_weight)
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
