@@ -55,6 +55,9 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
+HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -74,12 +77,26 @@ class CausalSelfAttention(nn.Module):
             if has_ve(layer_idx, config.n_layer)
             else None
         )
+        # Hebbian accumulator: running sum of co-activation (pre * post)
+        self.hebb_accum = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+
+        # Hebbian: accumulate co-activation of input x and value output v
+        # delta_W[i,j] += lr * x[...,i] * v[...,j]  (connections that fire together wire together)
+        with torch.no_grad():
+            x_flat = x.reshape(B * T, C)
+            v_flat = v.reshape(B * T, self.n_kv_head * self.head_dim)
+            # Mean outer product: (input_dim, output_dim)
+            hebb_delta = (x_flat.T @ v_flat) / (B * T)
+            if self.hebb_accum is None:
+                self.hebb_accum = hebb_delta
+            else:
+                self.hebb_accum += hebb_delta
 
         # Value residual (ResFormer): mix in value embedding with input-dependent gate per head
         if ve is not None:
@@ -95,6 +112,14 @@ class CausalSelfAttention(nn.Module):
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
+
+    @torch.no_grad()
+    def apply_hebbian(self):
+        """Apply accumulated Hebbian update to c_v weight and reset accumulator."""
+        if self.hebb_accum is not None:
+            # c_v.weight shape: (output_dim, input_dim), hebb_accum: (input_dim, output_dim)
+            self.c_v.weight.add_(self.hebb_accum.T, alpha=HEBB_LR)
+            self.hebb_accum = None
 
 
 class MLP(nn.Module):
@@ -713,6 +738,13 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
+    # Hebbian plasticity: strengthen connections that co-activated this step
+    for block in (
+        model._orig_mod.transformer.h
+        if hasattr(model, "_orig_mod")
+        else model.transformer.h
+    ):
+        block.attn.apply_hebbian()
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
