@@ -77,10 +77,8 @@ class CausalSelfAttention(nn.Module):
             if has_ve(layer_idx, config.n_layer)
             else None
         )
-        # Hebbian accumulators: running sum of co-activation (pre * post)
-        self.hebb_q = None
-        self.hebb_k = None
-        self.hebb_v = None
+        # Hebbian accumulator: running sum of co-activation (pre * post)
+        self.hebb_accum = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
@@ -88,29 +86,17 @@ class CausalSelfAttention(nn.Module):
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
 
-        # Hebbian: accumulate co-activation of input x with q, k, v outputs
-        # Connections that fire together wire together
+        # Hebbian: accumulate co-activation of input x and value output v
+        # delta_W[i,j] += lr * x[...,i] * v[...,j]  (connections that fire together wire together)
         with torch.no_grad():
             x_flat = x.reshape(B * T, C)
-            q_flat = q.reshape(B * T, self.n_head * self.head_dim)
-            k_flat = k.reshape(B * T, self.n_kv_head * self.head_dim)
             v_flat = v.reshape(B * T, self.n_kv_head * self.head_dim)
-            # Mean outer products: (input_dim, output_dim)
-            self.hebb_q = (
-                self.hebb_q + (x_flat.T @ q_flat) / (B * T)
-                if self.hebb_q is not None
-                else (x_flat.T @ q_flat) / (B * T)
-            )
-            self.hebb_k = (
-                self.hebb_k + (x_flat.T @ k_flat) / (B * T)
-                if self.hebb_k is not None
-                else (x_flat.T @ k_flat) / (B * T)
-            )
-            self.hebb_v = (
-                self.hebb_v + (x_flat.T @ v_flat) / (B * T)
-                if self.hebb_v is not None
-                else (x_flat.T @ v_flat) / (B * T)
-            )
+            # Mean outer product: (input_dim, output_dim)
+            hebb_delta = (x_flat.T @ v_flat) / (B * T)
+            if self.hebb_accum is None:
+                self.hebb_accum = hebb_delta
+            else:
+                self.hebb_accum += hebb_delta
 
         # Value residual (ResFormer): mix in value embedding with input-dependent gate per head
         if ve is not None:
@@ -128,17 +114,12 @@ class CausalSelfAttention(nn.Module):
         return y
 
     @torch.no_grad()
-    def apply_hebbian(self):
-        """Apply accumulated Hebbian updates to c_q, c_k, c_v weights and reset accumulators."""
-        if self.hebb_q is not None:
-            self.c_q.weight.add_(self.hebb_q.T, alpha=HEBB_LR)
-            self.hebb_q = None
-        if self.hebb_k is not None:
-            self.c_k.weight.add_(self.hebb_k.T, alpha=HEBB_LR)
-            self.hebb_k = None
-        if self.hebb_v is not None:
-            self.c_v.weight.add_(self.hebb_v.T, alpha=HEBB_LR)
-            self.hebb_v = None
+    def apply_hebbian(self, modulation=1.0):
+        """Apply accumulated Hebbian update to c_v weight and reset accumulator."""
+        if self.hebb_accum is not None:
+            effective_lr = HEBB_LR * modulation
+            self.c_v.weight.add_(self.hebb_accum.T, alpha=effective_lr)
+            self.hebb_accum = None
 
 
 class MLP(nn.Module):
@@ -733,12 +714,14 @@ while True:
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
     # Hebbian plasticity: strengthen connections that co-activated this step
+    # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
+    hebb_decay = 1.0 - 0.5 * progress  # decays from 1.0 to 0.5 over training
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
         else model.transformer.h
     ):
-        block.attn.apply_hebbian()
+        block.attn.apply_hebbian(modulation=hebb_decay)
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
