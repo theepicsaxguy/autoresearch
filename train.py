@@ -55,7 +55,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
+HEBB_LR = 1e-4  # Hebbian learning rate (higher for smaller model)
 
 
 class CausalSelfAttention(nn.Module):
@@ -79,6 +79,7 @@ class CausalSelfAttention(nn.Module):
         )
         # Hebbian accumulator: running sum of co-activation (pre * post)
         self.hebb_accum = None
+        self.hebb_proj = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
@@ -110,16 +111,27 @@ class CausalSelfAttention(nn.Module):
 
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.contiguous().view(B, T, -1)
+        # Hebbian for c_proj: co-activation of attention output and final output
+        with torch.no_grad():
+            y_flat = y.reshape(B * T, -1)
+            output_flat = self.c_proj(y).reshape(B * T, -1)
+            hebb_proj = (y_flat.T @ output_flat) / (B * T)
+            self.hebb_proj = (
+                self.hebb_proj + hebb_proj if self.hebb_proj is not None else hebb_proj
+            )
         y = self.c_proj(y)
         return y
 
     @torch.no_grad()
     def apply_hebbian(self, modulation=1.0):
-        """Apply accumulated Hebbian update to c_v weight and reset accumulator."""
+        """Apply accumulated Hebbian updates to c_v and c_proj weights."""
+        effective_lr = HEBB_LR * modulation
         if self.hebb_accum is not None:
-            effective_lr = HEBB_LR * modulation
             self.c_v.weight.add_(self.hebb_accum.T, alpha=effective_lr)
             self.hebb_accum = None
+        if self.hebb_proj is not None:
+            self.c_proj.weight.add_(self.hebb_proj.T, alpha=effective_lr)
+            self.hebb_proj = None
 
 
 class MLP(nn.Module):
@@ -577,18 +589,18 @@ WINDOW_PATTERN = "L"  # sliding window pattern: L=full, S=half context
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**14  # ~16K tokens per optimizer step
-EMBEDDING_LR = 0.4  # learning rate for token embeddings (Adam)
+EMBEDDING_LR = 0.6  # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04  # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5  # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2  # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95)  # Adam beta1, beta2
 WARMUP_RATIO = 0.0  # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.2  # fraction of time budget for LR warmdown
+WARMDOWN_RATIO = 0.7  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
 # Model size
-DEPTH = 4  # number of transformer layers
+DEPTH = 2  # number of transformer layers
 DEVICE_BATCH_SIZE = 64  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
@@ -675,7 +687,7 @@ def get_lr_multiplier(progress):
 
 def get_muon_momentum(step):
     frac = min(step / 300, 1)
-    return (1 - frac) * 0.65 + frac * 0.95
+    return (1 - frac) * 0.7 + frac * 0.95
 
 
 def get_weight_decay(progress):
@@ -715,7 +727,7 @@ while True:
     optimizer.step()
     # Hebbian plasticity: strengthen connections that co-activated this step
     # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
-    hebb_decay = 1.0 - 0.5 * progress  # decays from 1.0 to 0.5 over training
+    hebb_decay = 1.0 - 0.9 * progress  # decays from 1.0 to 0.1 over training (steeper)
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
