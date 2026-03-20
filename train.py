@@ -727,7 +727,7 @@ while True:
     optimizer.step()
     # Hebbian plasticity: strengthen connections that co-activated this step
     # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
-    hebb_decay = 1.0 - 0.9 * progress  # decays from 1.0 to 0.1 over training (steeper)
+    hebb_decay = 1.0 - 1.0 * progress  # decays from 1.0 to 0.0 over training (linear)
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
