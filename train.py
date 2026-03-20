@@ -55,7 +55,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-HEBB_LR = 1e-4  # Hebbian learning rate (higher for smaller model)
+HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
 
 
 class CausalSelfAttention(nn.Module):
@@ -110,25 +110,8 @@ class CausalSelfAttention(nn.Module):
 
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.contiguous().view(B, T, -1)
-
-        # Inhibitory neurons: penalize heads that are too similar
-        # Compute mean activation per head and penalize correlation
-        with torch.no_grad():
-            y_heads = y.view(B, T, self.n_head, self.head_dim)
-            head_means = y_heads.mean(dim=-1)  # (B, T, n_head)
-            # Correlation penalty: how similar are heads?
-            head_means_centered = head_means - head_means.mean(dim=-1, keepdim=True)
-            # Pairwise dot product (similarity)
-            similarity = torch.bmm(
-                head_means_centered.transpose(1, 2), head_means_centered
-            )  # (B, n_head, n_head)
-            # Penalty for off-diagonal (different heads being similar)
-            diversity_penalty = similarity.abs().sum() / (
-                self.n_head * (self.n_head - 1) + 1e-8
-            )
-
         y = self.c_proj(y)
-        return y, diversity_penalty
+        return y
 
     @torch.no_grad()
     def apply_hebbian(self, modulation=1.0):
@@ -159,10 +142,9 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size):
-        attn_out, diversity_penalty = self.attn(norm(x), ve, cos_sin, window_size)
-        x = x + attn_out
+        x = x + self.attn(norm(x), ve, cos_sin, window_size)
         x = x + self.mlp(norm(x))
-        return x, diversity_penalty
+        return x
 
 
 class GPT(nn.Module):
@@ -385,12 +367,10 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
-        total_diversity_penalty = torch.zeros(1, device=x.device)
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x, diversity_penalty = block(x, ve, cos_sin, self.window_sizes[i])
-            total_diversity_penalty = total_diversity_penalty + diversity_penalty
+            x = block(x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
         softcap = 15
@@ -399,15 +379,13 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            task_loss = F.cross_entropy(
+            loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
-            # Inhibitory neurons: penalize attention heads that are too similar
-            total_loss = task_loss + 0.001 * total_diversity_penalty
-            return total_loss
+            return loss
         return logits
 
 
@@ -601,16 +579,16 @@ WINDOW_PATTERN = "L"  # sliding window pattern: L=full, S=half context
 TOTAL_BATCH_SIZE = 2**14  # ~16K tokens per optimizer step
 EMBEDDING_LR = 0.6  # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
-MATRIX_LR = 0.06  # learning rate for matrix parameters (Muon)
+MATRIX_LR = 0.04  # learning rate for matrix parameters (Muon)
 SCALAR_LR = 0.5  # learning rate for per-layer scalars (Adam)
 WEIGHT_DECAY = 0.2  # cautious weight decay for Muon
 ADAM_BETAS = (0.8, 0.95)  # Adam beta1, beta2
 WARMUP_RATIO = 0.0  # fraction of time budget for LR warmup
-WARMDOWN_RATIO = 0.3  # fraction of time budget for LR warmdown
+WARMDOWN_RATIO = 0.5  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
 # Model size
-DEPTH = 1  # number of transformer layers
+DEPTH = 4  # number of transformer layers
 DEVICE_BATCH_SIZE = 64  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
@@ -737,7 +715,7 @@ while True:
     optimizer.step()
     # Hebbian plasticity: strengthen connections that co-activated this step
     # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
-    hebb_decay = 1.0 - 0.9 * progress  # decays from 1.0 to 0.1 over training (steeper)
+    hebb_decay = 1.0 - 0.5 * progress  # decays from 1.0 to 0.5 over training
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
