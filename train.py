@@ -127,42 +127,12 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
-        self.hebb_fc = None
-        self.hebb_proj = None
 
     def forward(self, x):
-        x_pre = x
         x = self.c_fc(x)
-        # Hebbian: accumulate co-activation of input and hidden
-        with torch.no_grad():
-            B, T, C = x_pre.shape
-            x_flat = x_pre.reshape(B * T, C)
-            h_flat = x.reshape(B * T, x.shape[-1])
-            self.hebb_fc = (
-                self.hebb_fc + (x_flat.T @ h_flat) / (B * T)
-                if self.hebb_fc is not None
-                else (x_flat.T @ h_flat) / (B * T)
-            )
-        x_hidden = F.relu(x).square()
-        # Hebbian: accumulate co-activation of hidden and output
-        with torch.no_grad():
-            o_flat = self.c_proj(x_hidden).reshape(B * T, self.c_proj.out_features)
-            self.hebb_proj = (
-                self.hebb_proj + (h_flat.T @ o_flat) / (B * T)
-                if self.hebb_proj is not None
-                else (h_flat.T @ o_flat) / (B * T)
-            )
-        x = self.c_proj(x_hidden)
+        x = F.relu(x).square()
+        x = self.c_proj(x)
         return x
-
-    @torch.no_grad()
-    def apply_hebbian(self, modulation=1.0):
-        if self.hebb_fc is not None:
-            self.c_fc.weight.add_(self.hebb_fc.T, alpha=HEBB_LR * modulation)
-            self.hebb_fc = None
-        if self.hebb_proj is not None:
-            self.c_proj.weight.add_(self.hebb_proj.T, alpha=HEBB_LR * modulation)
-            self.hebb_proj = None
 
 
 class Block(nn.Module):
@@ -752,7 +722,6 @@ while True:
         else model.transformer.h
     ):
         block.attn.apply_hebbian(modulation=hebb_decay)
-        block.mlp.apply_hebbian(modulation=hebb_decay)
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
