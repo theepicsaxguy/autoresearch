@@ -704,7 +704,7 @@ def get_weight_decay(progress):
 
 
 # Developmental pruning: newborn brain starts dense, adult brain prunes to sparse
-PRUNE_TARGET = 0.50  # fraction of transformer weights to prune by end of training
+PRUNE_TARGET = 0.55  # fraction of transformer weights to prune by end of training
 
 
 @torch.no_grad()
