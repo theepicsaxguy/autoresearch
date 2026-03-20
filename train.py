@@ -55,7 +55,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-HEBB_LR = 1e-4  # Hebbian learning rate (higher for smaller model)
+HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
 
 
 class CausalSelfAttention(nn.Module):
@@ -588,7 +588,7 @@ WARMDOWN_RATIO = 0.5  # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0  # final LR as fraction of initial
 
 # Model size
-DEPTH = 2  # number of transformer layers
+DEPTH = 4  # number of transformer layers
 DEVICE_BATCH_SIZE = 64  # per-device batch size (reduce if OOM)
 
 # ---------------------------------------------------------------------------
@@ -715,9 +715,7 @@ while True:
     optimizer.step()
     # Hebbian plasticity: strengthen connections that co-activated this step
     # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
-    hebb_decay = (
-        1.0 - 0.95 * progress
-    )  # decays from 1.0 to 0.05 over training (very steep)
+    hebb_decay = 1.0 - 0.5 * progress  # decays from 1.0 to 0.5 over training
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
