@@ -134,6 +134,9 @@ class CausalSelfAttention(nn.Module):
             self.hebb_proj = None
 
 
+SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
+
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -142,9 +145,14 @@ class MLP(nn.Module):
         self.c_gate = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_fc = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_proj = nn.Linear(intermediate, config.n_embd, bias=False)
+        self.k = max(1, int(intermediate * SPARSE_K))
 
     def forward(self, x):
-        return self.c_proj(F.silu(self.c_gate(x)) * self.c_fc(x))
+        h = F.silu(self.c_gate(x)) * self.c_fc(x)
+        # k-Winners: only top-k activations survive — sparse coding (brain fires ~5% of neurons)
+        threshold = h.abs().topk(self.k, dim=-1, sorted=False).values.amin(dim=-1, keepdim=True)
+        h = h * (h.abs() >= threshold)
+        return self.c_proj(h)
 
 
 class Block(nn.Module):
