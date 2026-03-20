@@ -55,7 +55,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
+HEBB_LR = 1e-4  # Hebbian learning rate (higher for smaller model)
 
 
 class CausalSelfAttention(nn.Module):
