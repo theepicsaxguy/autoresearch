@@ -110,8 +110,25 @@ class CausalSelfAttention(nn.Module):
 
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.contiguous().view(B, T, -1)
+
+        # Inhibitory neurons: penalize heads that are too similar
+        # Compute mean activation per head and penalize correlation
+        with torch.no_grad():
+            y_heads = y.view(B, T, self.n_head, self.head_dim)
+            head_means = y_heads.mean(dim=-1)  # (B, T, n_head)
+            # Correlation penalty: how similar are heads?
+            head_means_centered = head_means - head_means.mean(dim=-1, keepdim=True)
+            # Pairwise dot product (similarity)
+            similarity = torch.bmm(
+                head_means_centered.transpose(1, 2), head_means_centered
+            )  # (B, n_head, n_head)
+            # Penalty for off-diagonal (different heads being similar)
+            diversity_penalty = similarity.abs().sum() / (
+                self.n_head * (self.n_head - 1) + 1e-8
+            )
+
         y = self.c_proj(y)
-        return y
+        return y, diversity_penalty
 
     @torch.no_grad()
     def apply_hebbian(self, modulation=1.0):
@@ -142,9 +159,10 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+        attn_out, diversity_penalty = self.attn(norm(x), ve, cos_sin, window_size)
+        x = x + attn_out
         x = x + self.mlp(norm(x))
-        return x
+        return x, diversity_penalty
 
 
 class GPT(nn.Module):
@@ -367,10 +385,12 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
+        total_diversity_penalty = torch.zeros(1, device=x.device)
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i])
+            x, diversity_penalty = block(x, ve, cos_sin, self.window_sizes[i])
+            total_diversity_penalty = total_diversity_penalty + diversity_penalty
         x = norm(x)
 
         softcap = 15
@@ -379,13 +399,15 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            loss = F.cross_entropy(
+            task_loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
-            return loss
+            # Inhibitory neurons: penalize attention heads that are too similar
+            total_loss = task_loss + 0.001 * total_diversity_penalty
+            return total_loss
         return logits
 
 
