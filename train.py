@@ -79,6 +79,7 @@ class CausalSelfAttention(nn.Module):
         )
         # Hebbian accumulator: running sum of co-activation (pre * post)
         self.hebb_accum = None
+        self.hebb_proj = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
@@ -110,16 +111,27 @@ class CausalSelfAttention(nn.Module):
 
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.contiguous().view(B, T, -1)
+        # Hebbian for c_proj: co-activation of attention output and final output
+        with torch.no_grad():
+            y_flat = y.reshape(B * T, -1)
+            output_flat = self.c_proj(y).reshape(B * T, -1)
+            hebb_proj = (y_flat.T @ output_flat) / (B * T)
+            self.hebb_proj = (
+                self.hebb_proj + hebb_proj if self.hebb_proj is not None else hebb_proj
+            )
         y = self.c_proj(y)
         return y
 
     @torch.no_grad()
     def apply_hebbian(self, modulation=1.0):
-        """Apply accumulated Hebbian update to c_v weight and reset accumulator."""
+        """Apply accumulated Hebbian updates to c_v and c_proj weights."""
+        effective_lr = HEBB_LR * modulation
         if self.hebb_accum is not None:
-            effective_lr = HEBB_LR * modulation
             self.c_v.weight.add_(self.hebb_accum.T, alpha=effective_lr)
             self.hebb_accum = None
+        if self.hebb_proj is not None:
+            self.c_proj.weight.add_(self.hebb_proj.T, alpha=effective_lr)
+            self.hebb_proj = None
 
 
 class MLP(nn.Module):
