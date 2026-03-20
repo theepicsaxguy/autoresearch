@@ -638,7 +638,7 @@ def build_model_config(depth):
         vocab_size=vocab_size,
         n_layer=depth,
         n_head=num_heads,
-        n_kv_head=num_heads,
+        n_kv_head=1,  # Multi-Query Attention: all query heads share 1 K,V head
         n_embd=model_dim,
         window_pattern=WINDOW_PATTERN,
     )
