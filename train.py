@@ -703,6 +703,27 @@ def get_weight_decay(progress):
     return WEIGHT_DECAY * (1 - progress)
 
 
+# Developmental pruning: newborn brain starts dense, adult brain prunes to sparse
+PRUNE_TARGET = 0.50  # fraction of transformer weights to prune by end of training
+
+
+@torch.no_grad()
+def apply_developmental_pruning(model, prune_frac):
+    """Zero out the weakest weights globally — synaptic pruning by magnitude."""
+    if prune_frac <= 0.0:
+        return
+    blocks = (model._orig_mod if hasattr(model, "_orig_mod") else model).transformer.h
+    all_vals = torch.cat([
+        p.data.abs().flatten()
+        for block in blocks for p in block.parameters() if p.ndim == 2
+    ])
+    threshold = all_vals.quantile(prune_frac)
+    for block in blocks:
+        for p in block.parameters():
+            if p.ndim == 2:
+                p.data *= (p.data.abs() >= threshold).to(p.dtype)
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -734,6 +755,10 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
+    # Developmental pruning: ramp from 0% pruned (newborn) to PRUNE_TARGET% (adult)
+    prune_frac = PRUNE_TARGET * progress
+    if step % 20 == 0:
+        apply_developmental_pruning(model, prune_frac)
     # Hebbian plasticity: strengthen connections that co-activated this step
     # Developmental Hebbian: high plasticity early (childhood), consolidate later (adulthood)
     hebb_decay = 0.9 ** (progress * 10)  # exponential decay from 1.0
