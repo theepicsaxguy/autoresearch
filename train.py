@@ -56,6 +56,7 @@ def apply_rotary_emb(x, cos, sin):
 
 
 HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
+HEBB_BASELINE_LOSS = 2.0  # baseline loss for neuromodulation (surprise threshold)
 
 
 class CausalSelfAttention(nn.Module):
@@ -114,11 +115,16 @@ class CausalSelfAttention(nn.Module):
         return y
 
     @torch.no_grad()
-    def apply_hebbian(self):
-        """Apply accumulated Hebbian update to c_v weight and reset accumulator."""
+    @torch.no_grad()
+    def apply_hebbian(self, modulation=1.0):
+        """Apply accumulated Hebbian update to c_v weight with neuromodulation.
+
+        modulation > 1.0: surprise/attention (learn faster)
+        modulation < 1.0: familiarity/safety (consolidate)
+        """
         if self.hebb_accum is not None:
-            # c_v.weight shape: (output_dim, input_dim), hebb_accum: (input_dim, output_dim)
-            self.c_v.weight.add_(self.hebb_accum.T, alpha=HEBB_LR)
+            effective_lr = HEBB_LR * modulation
+            self.c_v.weight.add_(self.hebb_accum.T, alpha=effective_lr)
             self.hebb_accum = None
 
 
@@ -738,13 +744,15 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
-    # Hebbian plasticity: strengthen connections that co-activated this step
+    # Neuromodulation: Hebbian LR spikes on surprise (high loss), drops on familiarity
+    train_loss_f = train_loss.item()
+    hebb_modulation = max(0.1, min(10.0, train_loss_f / HEBB_BASELINE_LOSS))
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
         else model.transformer.h
     ):
-        block.attn.apply_hebbian()
+        block.attn.apply_hebbian(hebb_modulation)
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
