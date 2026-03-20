@@ -56,7 +56,6 @@ def apply_rotary_emb(x, cos, sin):
 
 
 HEBB_LR = 1e-5  # Hebbian learning rate (tiny, shapes representations locally)
-HEBB_BASELINE_LOSS = 2.0  # baseline loss for neuromodulation (surprise threshold)
 
 
 class CausalSelfAttention(nn.Module):
@@ -78,8 +77,10 @@ class CausalSelfAttention(nn.Module):
             if has_ve(layer_idx, config.n_layer)
             else None
         )
-        # Hebbian accumulator: running sum of co-activation (pre * post)
-        self.hebb_accum = None
+        # Hebbian accumulators: running sum of co-activation (pre * post)
+        self.hebb_q = None
+        self.hebb_k = None
+        self.hebb_v = None
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
@@ -87,17 +88,29 @@ class CausalSelfAttention(nn.Module):
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
 
-        # Hebbian: accumulate co-activation of input x and value output v
-        # delta_W[i,j] += lr * x[...,i] * v[...,j]  (connections that fire together wire together)
+        # Hebbian: accumulate co-activation of input x with q, k, v outputs
+        # Connections that fire together wire together
         with torch.no_grad():
             x_flat = x.reshape(B * T, C)
+            q_flat = q.reshape(B * T, self.n_head * self.head_dim)
+            k_flat = k.reshape(B * T, self.n_kv_head * self.head_dim)
             v_flat = v.reshape(B * T, self.n_kv_head * self.head_dim)
-            # Mean outer product: (input_dim, output_dim)
-            hebb_delta = (x_flat.T @ v_flat) / (B * T)
-            if self.hebb_accum is None:
-                self.hebb_accum = hebb_delta
-            else:
-                self.hebb_accum += hebb_delta
+            # Mean outer products: (input_dim, output_dim)
+            self.hebb_q = (
+                self.hebb_q + (x_flat.T @ q_flat) / (B * T)
+                if self.hebb_q is not None
+                else (x_flat.T @ q_flat) / (B * T)
+            )
+            self.hebb_k = (
+                self.hebb_k + (x_flat.T @ k_flat) / (B * T)
+                if self.hebb_k is not None
+                else (x_flat.T @ k_flat) / (B * T)
+            )
+            self.hebb_v = (
+                self.hebb_v + (x_flat.T @ v_flat) / (B * T)
+                if self.hebb_v is not None
+                else (x_flat.T @ v_flat) / (B * T)
+            )
 
         # Value residual (ResFormer): mix in value embedding with input-dependent gate per head
         if ve is not None:
@@ -115,17 +128,17 @@ class CausalSelfAttention(nn.Module):
         return y
 
     @torch.no_grad()
-    @torch.no_grad()
-    def apply_hebbian(self, modulation=1.0):
-        """Apply accumulated Hebbian update to c_v weight with neuromodulation.
-
-        modulation > 1.0: surprise/attention (learn faster)
-        modulation < 1.0: familiarity/safety (consolidate)
-        """
-        if self.hebb_accum is not None:
-            effective_lr = HEBB_LR * modulation
-            self.c_v.weight.add_(self.hebb_accum.T, alpha=effective_lr)
-            self.hebb_accum = None
+    def apply_hebbian(self):
+        """Apply accumulated Hebbian updates to c_q, c_k, c_v weights and reset accumulators."""
+        if self.hebb_q is not None:
+            self.c_q.weight.add_(self.hebb_q.T, alpha=HEBB_LR)
+            self.hebb_q = None
+        if self.hebb_k is not None:
+            self.c_k.weight.add_(self.hebb_k.T, alpha=HEBB_LR)
+            self.hebb_k = None
+        if self.hebb_v is not None:
+            self.c_v.weight.add_(self.hebb_v.T, alpha=HEBB_LR)
+            self.hebb_v = None
 
 
 class MLP(nn.Module):
@@ -142,26 +155,13 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    """Transformer block with speculative shortcut: cheap prediction + learned trust."""
-
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
-        # Cheap prediction: single linear projection (conceptually parallel to attention)
-        self.cheap_predictor = nn.Linear(config.n_embd, config.n_embd, bias=False)
-        # Learned trust weight: how much to rely on full attention vs cheap prediction
-        self.trust_weight = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x, ve, cos_sin, window_size):
-        x_norm = norm(x)
-        # Cheap prediction path (could run in parallel with attention)
-        cheap_pred = self.cheap_predictor(x_norm)
-        # Full attention path
-        attn_out = self.attn(x_norm, ve, cos_sin, window_size)
-        # Learned combination: sigmoid(trust) weights attention vs cheap prediction
-        w = torch.sigmoid(self.trust_weight)
-        x = x + w * attn_out + (1 - w) * cheap_pred
+        x = x + self.attn(norm(x), ve, cos_sin, window_size)
         x = x + self.mlp(norm(x))
         return x
 
@@ -211,8 +211,6 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.attn.c_proj.weight)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
-            torch.nn.init.uniform_(block.cheap_predictor.weight, -s, s)
-            torch.nn.init.zeros_(block.trust_weight)
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
@@ -303,8 +301,7 @@ class GPT(nn.Module):
         scalar_lr=0.5,
     ):
         model_dim = self.config.n_embd
-        matrix_params = [p for p in self.transformer.h.parameters() if p.ndim >= 2]
-        scalar_params = [p for p in self.transformer.h.parameters() if p.ndim == 0]
+        matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
@@ -312,7 +309,6 @@ class GPT(nn.Module):
         x0_params = [self.x0_lambdas]
         assert len(list(self.parameters())) == (
             len(matrix_params)
-            + len(scalar_params)
             + len(embedding_params)
             + len(lm_head_params)
             + len(value_embeds_params)
@@ -360,14 +356,6 @@ class GPT(nn.Module):
                 params=x0_params,
                 lr=scalar_lr,
                 betas=(0.96, 0.95),
-                eps=1e-10,
-                weight_decay=0.0,
-            ),
-            dict(
-                kind="adamw",
-                params=scalar_params,
-                lr=scalar_lr,
-                betas=adam_betas,
                 eps=1e-10,
                 weight_decay=0.0,
             ),
@@ -744,15 +732,13 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
-    # Neuromodulation: Hebbian LR spikes on surprise (high loss), drops on familiarity
-    train_loss_f = train_loss.item()
-    hebb_modulation = max(0.1, min(10.0, train_loss_f / HEBB_BASELINE_LOSS))
+    # Hebbian plasticity: strengthen connections that co-activated this step
     for block in (
         model._orig_mod.transformer.h
         if hasattr(model, "_orig_mod")
         else model.transformer.h
     ):
-        block.attn.apply_hebbian(hebb_modulation)
+        block.attn.apply_hebbian()
     model.zero_grad(set_to_none=True)
 
     train_loss_f = train_loss.item()
