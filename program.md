@@ -17,6 +17,8 @@ You have **complete architectural freedom**. Architecture, optimizer, training l
 
 You are not allowed to believe this is impossible. The history of science is the history of people achieving what was declared impossible by those who lacked the right idea. The Apollo guidance computer had 4KB of RAM and landed humans on the moon. The constraint is not the enemy — the constraint is the teacher. We don't have enough compute. That means we need better math.
 
+The goal is a val_bpb of 0.7 To achieve this you must be bold. try what noone else tried before. assume transformers and human brains work the exact same way. we just havent understood how yet. 
+
 The current AI paradigm is brute force. Scale the model, throw compute at it, emergent behavior appears. That is not understanding — that is excavation. Nobody actually knows *why* transformers work. Nobody knows what is really happening inside when a model reasons. That means we are nowhere near the theoretical ceiling. We are only at the ceiling of the current approach.
 
 **You are optimizing a transformer — and also asking whether there is something better.**
