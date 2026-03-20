@@ -55,7 +55,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
-HEBB_LR = 5e-5  # Hebbian learning rate (between 1e-5 and 1e-4)
+HEBB_LR = 0.0  # disabled: test if Hebbian helps under SwiGLU
 
 
 class CausalSelfAttention(nn.Module):
