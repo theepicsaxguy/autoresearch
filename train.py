@@ -103,21 +103,26 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
+# Spiking surrogate gate (NeuronSpark 2026):
+# Replace SiLU with sigmoid(beta * gate) — approximates binary spike (fire/don't fire).
+# Elementwise, identical FLOPs/VRAM/throughput to SwiGLU.
+# Biology: integrate-and-fire neurons with threshold dynamics.
+# Beta=4: moderate sparsity, gradients concentrated near threshold (decision boundary).
+# Unlike softmax (global competition), each neuron decides INDEPENDENTLY.
+# Unlike SiLU (always nonzero), spike is binary → sparse code → diverse representations.
+SPIKE_BETA = 4.0
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # SwiGLU: 3x intermediate — slightly more MLP capacity
         intermediate = int(config.n_embd * 3)
         self.c_gate = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_fc = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_proj = nn.Linear(intermediate, config.n_embd, bias=False)
-        self.k = max(1, int(intermediate * SPARSE_K))
 
     def forward(self, x):
-        h = F.silu(self.c_gate(x)) * self.c_fc(x)
+        h = torch.sigmoid(SPIKE_BETA * self.c_gate(x)) * self.c_fc(x)
         return self.c_proj(h)
 
 
