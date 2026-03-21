@@ -103,21 +103,29 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
+# Hopfield MLP: competitive softmax gate (Hopfield pattern retrieval)
+# Instead of SiLU(gate) * fc(x), use softmax(beta * gate) * fc(x).
+# All 768 intermediate neurons COMPETE via softmax — only the best-matching
+# patterns pass signal. This is Kanerva-style content-addressable memory:
+# "which stored patterns does this token activate?" rather than "how much
+# does each feature activate independently?"
+# Beta controls sparsity: beta=4 → ~10 effective winners out of 768.
+# Same FLOPs, same params, zero throughput cost.
+HOPFIELD_BETA = 4.0
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # SwiGLU: 3x intermediate — slightly more MLP capacity
+        # SwiGLU: 3x intermediate — Hopfield uses same structure
         intermediate = int(config.n_embd * 3)
         self.c_gate = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_fc = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_proj = nn.Linear(intermediate, config.n_embd, bias=False)
-        self.k = max(1, int(intermediate * SPARSE_K))
 
     def forward(self, x):
-        h = F.silu(self.c_gate(x)) * self.c_fc(x)
+        # Competitive pattern retrieval: winners suppress losers via softmax
+        h = F.softmax(HOPFIELD_BETA * self.c_gate(x), dim=-1) * self.c_fc(x)
         return self.c_proj(h)
 
 
@@ -698,26 +706,6 @@ def apply_developmental_pruning(model, prune_frac):
                 p.data *= (p.data.abs() >= threshold).to(p.dtype)
 
 
-# Hebbian weight row normalization (GHL 2026 simplified):
-# After each optimizer step, gently pull weight rows toward unit norm.
-# Competitive learning effect: each neuron maintains equal "loudness" — no single
-# feature can dominate by growing large. Oja's rule in weight space.
-# Strength ~0.0001: tiny nudge per step, builds up over ~1000 steps to ~10% correction.
-HEBBIAN_STRENGTH = 0.0001
-
-
-@torch.no_grad()
-def apply_hebbian_consolidation(model, strength):
-    """Push weight rows toward unit norm — competitive learning, Oja's rule."""
-    orig = model._orig_mod if hasattr(model, "_orig_mod") else model
-    for block in orig.transformer.h:
-        for p in block.parameters():
-            if p.ndim == 2:
-                row_norm = p.float().norm(dim=1, keepdim=True).clamp(min=1e-6)
-                normalized = (p.float() / row_norm).to(p.dtype)
-                p.lerp_(normalized, strength)
-
-
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -750,8 +738,6 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
-    # Hebbian weight row normalization: competitive learning after every optimizer step
-    apply_hebbian_consolidation(model, HEBBIAN_STRENGTH)
     # Developmental pruning: ramp from 0% pruned (newborn) to PRUNE_TARGET% (adult)
     prune_frac = PRUNE_TARGET * progress
     if step % 20 == 0:
