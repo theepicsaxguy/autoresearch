@@ -91,27 +91,14 @@ class CausalSelfAttention(nn.Module):
 
         cos, sin = cos_sin
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
-        # No qk-norm: phase values need full dynamic range for meaningful phase differentiation
+        q, k = norm(q), norm(k)
 
-        # Transpose to [B, H, T, D]
+        # Transpose to [B, H, T, D] as required by SDPA (was missing — critical bug fix)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-
-        # Kuramoto Phase Synchrony Attention (SSA, 2026):
-        # score(i,j) = Σ_d cos(q_d - k_d) / sqrt(D)
-        # Via trig identity: cos(a-b) = cos(a)cos(b) + sin(a)sin(b)
-        # => score = (cos(q) @ cos(k).T + sin(q) @ sin(k).T) / sqrt(D)
-        # Periodic bounded similarity: resonant token pairs (same phase) → max score
-        # Anti-phase pairs → negative score; naturally sparse attention pattern
-        cq, sq = torch.cos(q), torch.sin(q)
-        ck, sk = torch.cos(k), torch.sin(k)
-        scale = 1.0 / math.sqrt(self.head_dim)
-        scores = (cq @ ck.transpose(-2, -1) + sq @ sk.transpose(-2, -1)) * scale
-        causal = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
-        scores = scores.masked_fill(~causal[None, None], float('-inf'))
-        attn = F.softmax(scores.float(), dim=-1).to(q.dtype)
-        y = (attn @ v).transpose(1, 2).contiguous().view(B, T, -1)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
