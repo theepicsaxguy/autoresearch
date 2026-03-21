@@ -367,28 +367,13 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            main_loss = F.cross_entropy(
+            loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
-            # Multi-scale prediction: also predict token+8 using same logits.
-            # Forces model to develop representations useful over phrase-level horizons.
-            # Same lm_head, zero extra params, one cheap CE computation.
-            # Gated on self.training: does NOT contaminate evaluate_bpb.
-            FUTURE_HORIZON = 8
-            FUTURE_WEIGHT = 0.2
-            if self.training and T > FUTURE_HORIZON and reduction == "mean":
-                future_logits = logits[:, :-FUTURE_HORIZON]  # predict using positions 0..T-H-1
-                future_targets = targets[:, FUTURE_HORIZON:]  # targets are tokens H steps ahead
-                future_loss = F.cross_entropy(
-                    future_logits.reshape(-1, future_logits.size(-1)),
-                    future_targets.reshape(-1),
-                    ignore_index=-1,
-                )
-                return main_loss + FUTURE_WEIGHT * future_loss
-            return main_loss
+            return loss
         return logits
 
 
