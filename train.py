@@ -103,29 +103,21 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
-# Hopfield MLP: competitive softmax gate (Hopfield pattern retrieval)
-# Instead of SiLU(gate) * fc(x), use softmax(beta * gate) * fc(x).
-# All 768 intermediate neurons COMPETE via softmax — only the best-matching
-# patterns pass signal. This is Kanerva-style content-addressable memory:
-# "which stored patterns does this token activate?" rather than "how much
-# does each feature activate independently?"
-# Beta controls sparsity: beta=4 → ~10 effective winners out of 768.
-# Same FLOPs, same params, zero throughput cost.
-HOPFIELD_BETA = 4.0
+SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # SwiGLU: 3x intermediate — Hopfield uses same structure
+        # SwiGLU: 3x intermediate — slightly more MLP capacity
         intermediate = int(config.n_embd * 3)
         self.c_gate = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_fc = nn.Linear(config.n_embd, intermediate, bias=False)
         self.c_proj = nn.Linear(intermediate, config.n_embd, bias=False)
+        self.k = max(1, int(intermediate * SPARSE_K))
 
     def forward(self, x):
-        # Competitive pattern retrieval: winners suppress losers via softmax
-        h = F.softmax(HOPFIELD_BETA * self.c_gate(x), dim=-1) * self.c_fc(x)
+        h = F.silu(self.c_gate(x)) * self.c_fc(x)
         return self.c_proj(h)
 
 
@@ -363,12 +355,10 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
-
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-
         x = norm(x)
 
         softcap = 15
@@ -377,12 +367,13 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            return F.cross_entropy(
+            loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
+            return loss
         return logits
 
 
