@@ -364,7 +364,7 @@ class GPT(nn.Module):
         # directly from higher areas, not only through sequential feedforward/backprop.
         # Cost: O(B*T*D) per aux layer — essentially free. Zero extra parameters.
         DFA_LAYERS = {3, 6}  # layers with direct embedding-alignment feedback
-        DFA_WEIGHT = 0.25    # LR sweep: 0.15 won exp211, testing stronger signal
+        DFA_WEIGHT = 0.35    # sweep: 0.15→1.155, 0.25→1.131, testing 0.35
         aux_losses = []
 
         for i, block in enumerate(self.transformer.h):
