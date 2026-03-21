@@ -356,28 +356,10 @@ class GPT(nn.Module):
         x = norm(x)
         x0 = x
 
-        # Direct Feedback Alignment (Kolen-Pollack 2026):
-        # At intermediate layers, give direct error signal via embedding cosine similarity.
-        # aux_loss = -cosine_similarity(norm(x_layer), wte(targets), dim=-1).mean()
-        # Mechanism: each early layer gets a direct gradient to the wte embedding space,
-        # bypassing the O(L) backprop chain. Brain-like: each cortical area gets feedback
-        # directly from higher areas, not only through sequential feedforward/backprop.
-        # Cost: O(B*T*D) per aux layer — essentially free. Zero extra parameters.
-        DFA_LAYERS = {3, 6}  # layers with direct embedding-alignment feedback
-        DFA_WEIGHT = 0.35    # sweep: 0.15→1.155, 0.25→1.131, testing 0.35
-        aux_losses = []
-
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-            # Direct feedback: push intermediate representation toward target token embedding
-            # Gate on self.training: DFA must NOT fire during evaluate_bpb (would contaminate bpb)
-            if targets is not None and i in DFA_LAYERS and self.training:
-                h = norm(x).float()  # [B, T, D]
-                target_emb = self.transformer.wte(targets).float()  # [B, T, D]
-                cos_sim = F.cosine_similarity(h, target_emb, dim=-1)  # [B, T]
-                aux_losses.append(-cos_sim.mean())
 
         x = norm(x)
 
@@ -387,15 +369,12 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            main_loss = F.cross_entropy(
+            return F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
-            if aux_losses:
-                return main_loss + DFA_WEIGHT * sum(aux_losses) / len(aux_losses)
-            return main_loss
         return logits
 
 
@@ -719,6 +698,26 @@ def apply_developmental_pruning(model, prune_frac):
                 p.data *= (p.data.abs() >= threshold).to(p.dtype)
 
 
+# Hebbian weight row normalization (GHL 2026 simplified):
+# After each optimizer step, gently pull weight rows toward unit norm.
+# Competitive learning effect: each neuron maintains equal "loudness" — no single
+# feature can dominate by growing large. Oja's rule in weight space.
+# Strength ~0.0001: tiny nudge per step, builds up over ~1000 steps to ~10% correction.
+HEBBIAN_STRENGTH = 0.0001
+
+
+@torch.no_grad()
+def apply_hebbian_consolidation(model, strength):
+    """Push weight rows toward unit norm — competitive learning, Oja's rule."""
+    orig = model._orig_mod if hasattr(model, "_orig_mod") else model
+    for block in orig.transformer.h:
+        for p in block.parameters():
+            if p.ndim == 2:
+                row_norm = p.float().norm(dim=1, keepdim=True).clamp(min=1e-6)
+                normalized = (p.float() / row_norm).to(p.dtype)
+                p.lerp_(normalized, strength)
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -751,6 +750,8 @@ while True:
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
+    # Hebbian weight row normalization: competitive learning after every optimizer step
+    apply_hebbian_consolidation(model, HEBBIAN_STRENGTH)
     # Developmental pruning: ramp from 0% pruned (newborn) to PRUNE_TARGET% (adult)
     prune_frac = PRUNE_TARGET * progress
     if step % 20 == 0:
