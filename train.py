@@ -363,7 +363,7 @@ class GPT(nn.Module):
         # bypassing the O(L) backprop chain. Brain-like: each cortical area gets feedback
         # directly from higher areas, not only through sequential feedforward/backprop.
         # Cost: O(B*T*D) per aux layer — essentially free. Zero extra parameters.
-        DFA_LAYERS = {0, 1, 2, 3, 4, 5, 6}  # ALL intermediate layers — maximum direct feedback coverage
+        DFA_LAYERS = {3, 6}  # layers with direct embedding-alignment feedback
         DFA_WEIGHT = 0.15    # weight of auxiliary losses relative to main CE loss
         aux_losses = []
 
