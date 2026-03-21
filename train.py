@@ -372,7 +372,8 @@ class GPT(nn.Module):
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
             # Direct feedback: push intermediate representation toward target token embedding
-            if targets is not None and i in DFA_LAYERS:
+            # Gate on self.training: DFA must NOT fire during evaluate_bpb (would contaminate bpb)
+            if targets is not None and i in DFA_LAYERS and self.training:
                 h = norm(x).float()  # [B, T, D]
                 target_emb = self.transformer.wte(targets).float()  # [B, T, D]
                 cos_sim = F.cosine_similarity(h, target_emb, dim=-1)  # [B, T]
