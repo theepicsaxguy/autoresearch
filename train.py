@@ -124,26 +124,13 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.use_predictor = layer_idx < (config.n_layer // 2)
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
-        if self.use_predictor:
-            predictor_rank = 8
-            self.predictor_down = nn.Linear(config.n_embd, predictor_rank, bias=False)
-            self.predictor_up = nn.Linear(predictor_rank, config.n_embd, bias=False)
-        else:
-            self.predictor_down = None
-            self.predictor_up = None
 
     def forward(self, x, ve, cos_sin, window_size):
-        if self.use_predictor:
-            pred = self.predictor_up(self.predictor_down(x))
-            x = x - pred
         # Peri-LN: pre-norm + post-norm on each sublayer
         x = x + norm(self.attn(norm(x), ve, cos_sin, window_size))
         x = x + norm(self.mlp(norm(x)))
-        if self.use_predictor:
-            x = x + pred
         return x
 
 
@@ -195,9 +182,6 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
-            if block.use_predictor:
-                torch.nn.init.uniform_(block.predictor_down.weight, -s, s)
-                torch.nn.init.zeros_(block.predictor_up.weight)
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
