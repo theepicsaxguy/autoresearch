@@ -126,6 +126,12 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
+        # Future Hidden State Alignment predictor (early layers only).
+        # At layers 0-3: predict next-position's hidden state direction.
+        # This is a local credit-assignment signal: "position t's representation
+        # should help predict where position t+1 will land in hidden space."
+        # Tiny linear (D×D = 65K params), no vocab dependency, free throughput.
+        self.fhsa_pred = nn.Linear(config.n_embd, config.n_embd, bias=False) if layer_idx < 4 else None
 
     def forward(self, x, ve, cos_sin, window_size):
         # Peri-LN: pre-norm + post-norm on each sublayer
@@ -355,10 +361,21 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
+        # Future Hidden State Alignment (FHSA): local developmental credit signal.
+        # At layers 0-3, each position's representation predicts the next position's
+        # hidden state direction (cosine similarity). Contextual target (not vocab).
+        # Gated on self.training — eval-clean. Weight 0.2, zero throughput cost.
+        FHSA_WEIGHT = 0.2
+        fhsa_losses = []
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
+            if self.training and block.fhsa_pred is not None and T > 1:
+                pred = block.fhsa_pred(x[:, :-1].float())   # [B, T-1, D]
+                target = x[:, 1:].float().detach()           # [B, T-1, D]
+                cos = F.cosine_similarity(pred, target, dim=-1)
+                fhsa_losses.append(-cos.mean())
         x = norm(x)
 
         softcap = 15
@@ -367,13 +384,15 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap)
 
         if targets is not None:
-            loss = F.cross_entropy(
+            main_loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
                 ignore_index=-1,
                 reduction=reduction,
             )
-            return loss
+            if fhsa_losses:
+                return main_loss + FHSA_WEIGHT * sum(fhsa_losses) / len(fhsa_losses)
+            return main_loss
         return logits
 
 
