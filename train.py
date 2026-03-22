@@ -588,7 +588,7 @@ WARMDOWN_RATIO = 0.9  # fraction of time budget for LR warmdown — push even mo
 FINAL_LR_FRAC = 0.05  # final LR as fraction of initial — keep learning at end
 
 # Model size
-DEPTH = 7  # exp220: 7 unique blocks + 1 reuse pass = 8 forward passes, same compute as baseline
+DEPTH = 8  # exp221: 8 unique blocks + 1 reuse pass of last block = 9 total passes (settling)
 DEVICE_BATCH_SIZE = 16  # per-device batch size — use more VRAM for activations
 
 # ---------------------------------------------------------------------------
