@@ -77,7 +77,7 @@ class CausalSelfAttention(nn.Module):
             else None
         )
 
-    def forward(self, x, ve, cos_sin, attn_mask):
+    def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -97,10 +97,7 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        if attn_mask is None:
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        else:
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -130,9 +127,9 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, attn_mask):
+    def forward(self, x, ve, cos_sin, window_size):
         # Peri-LN: pre-norm + post-norm on each sublayer
-        x = x + norm(self.attn(norm(x), ve, cos_sin, attn_mask))
+        x = x + norm(self.attn(norm(x), ve, cos_sin, window_size))
         x = x + norm(self.mlp(norm(x)))
         return x
 
@@ -168,11 +165,6 @@ class GPT(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
-        self.register_buffer(
-            "short_attn_mask",
-            self._build_sliding_window_mask(config.sequence_len, config.sequence_len // 2),
-            persistent=False,
-        )
 
     @torch.no_grad()
     def init_weights(self):
@@ -229,22 +221,13 @@ class GPT(nn.Module):
         assert all(c in "SL" for c in pattern)
         long_window = config.sequence_len
         short_window = long_window // 2
-        char_to_window = {"L": long_window, "S": short_window}
+        char_to_window = {"L": (long_window, 0), "S": (short_window, 0)}
         window_sizes = []
         for layer_idx in range(config.n_layer):
             char = pattern[layer_idx % len(pattern)]
             window_sizes.append(char_to_window[char])
-        window_sizes[-1] = long_window
+        window_sizes[-1] = (long_window, 0)
         return window_sizes
-
-    def _build_sliding_window_mask(self, seq_len, window):
-        q_idx = torch.arange(seq_len, dtype=torch.int32)
-        k_idx = torch.arange(seq_len, dtype=torch.int32)
-        distance = q_idx[:, None] - k_idx[None, :]
-        allowed = (distance >= 0) & (distance < window)
-        mask = torch.zeros(seq_len, seq_len, dtype=torch.float32)
-        mask.masked_fill_(~allowed, float("-inf"))
-        return mask.view(1, 1, seq_len, seq_len)
 
     def estimate_flops(self):
         """Estimated FLOPs per token (forward + backward)."""
@@ -262,7 +245,8 @@ class GPT(nn.Module):
         t = self.config.sequence_len
         attn_flops = 0
         for window_size in self.window_sizes:
-            effective_seq = min(window_size, t)
+            window = window_size[0]
+            effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
         return 6 * (nparams - nparams_exclude) + attn_flops
 
@@ -393,10 +377,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            attn_mask = None
-            if self.window_sizes[i] < T:
-                attn_mask = self.short_attn_mask[:, :, :T, :T]
-            x = block(x, ve, cos_sin, attn_mask)
+            x = block(x, ve, cos_sin, self.window_sizes[i])
             x_avg = x_avg + mix_weights[i + 1] * x
         x = norm(x_avg)
 
@@ -600,7 +581,7 @@ class MuonAdamW(torch.optim.Optimizer):
 # Model architecture
 ASPECT_RATIO = 32  # model_dim = depth * ASPECT_RATIO (32*8=256, n_head=4)
 HEAD_DIM = 128  # target head dimension — fewer but more powerful heads (n_head=2)
-WINDOW_PATTERN = "SSSL"  # real local/global mix: early layers short-window, late layers global
+WINDOW_PATTERN = "L"  # all layers use full attention — test if D8 benefits from global context
 
 # Optimization
 TOTAL_BATCH_SIZE = 2**15  # ~32K tokens per optimizer step — larger batch, no grad accum overhead
