@@ -148,8 +148,6 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
-        self.depth_state_lambdas = nn.Parameter(torch.zeros(config.n_layer))
-        self.depth_state_decay = nn.Parameter(torch.zeros(config.n_layer))
         # Deep layer averaging: learned weights to blend all layer outputs
         self.layer_mix = nn.Parameter(torch.zeros(config.n_layer + 1))  # +1 for pre-block embedding
         # Value embeddings
@@ -187,8 +185,6 @@ class GPT(nn.Module):
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
-        self.depth_state_lambdas.fill_(0.05)
-        self.depth_state_decay.fill_(0.0)  # sigmoid(0)=0.5: equal blend of old state and new layer output
         # Layer mix: init so last layer dominates (like baseline)
         self.layer_mix.fill_(-10.0)
         self.layer_mix.data[-1] = 0.0  # last layer gets weight ~1.0 after softmax
@@ -242,8 +238,6 @@ class GPT(nn.Module):
             + value_embeds_numel
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
-            + self.depth_state_lambdas.numel()
-            + self.depth_state_decay.numel()
             + self.layer_mix.numel()
         )
         h = self.config.n_head
@@ -261,13 +255,7 @@ class GPT(nn.Module):
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = (
-            self.resid_lambdas.numel()
-            + self.x0_lambdas.numel()
-            + self.depth_state_lambdas.numel()
-            + self.depth_state_decay.numel()
-            + self.layer_mix.numel()
-        )
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.layer_mix.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
@@ -294,7 +282,6 @@ class GPT(nn.Module):
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
-        depth_state_params = [self.depth_state_lambdas, self.depth_state_decay]
         mix_params = [self.layer_mix]
         assert len(list(self.parameters())) == (
             len(matrix_params)
@@ -303,7 +290,6 @@ class GPT(nn.Module):
             + len(value_embeds_params)
             + len(resid_params)
             + len(x0_params)
-            + len(depth_state_params)
             + len(mix_params)
         )
         # Scale LR ∝ 1/√dmodel (tuned at 768 dim)
@@ -352,14 +338,6 @@ class GPT(nn.Module):
             ),
             dict(
                 kind="adamw",
-                params=depth_state_params,
-                lr=scalar_lr,
-                betas=(0.96, 0.95),
-                eps=1e-10,
-                weight_decay=0.0,
-            ),
-            dict(
-                kind="adamw",
                 params=mix_params,
                 lr=scalar_lr,
                 betas=(0.96, 0.95),
@@ -393,20 +371,13 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
-        depth_state = torch.zeros_like(x)
         # Deep layer averaging: collect all layer outputs
         mix_weights = F.softmax(self.layer_mix, dim=0)
         x_avg = mix_weights[0] * x  # pre-block embedding contribution
         for i, block in enumerate(self.transformer.h):
-            x = (
-                self.resid_lambdas[i] * x
-                + self.x0_lambdas[i] * x0
-                + self.depth_state_lambdas[i] * depth_state
-            )
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-            decay = torch.sigmoid(self.depth_state_decay[i])
-            depth_state = decay * depth_state + (1 - decay) * x
             x_avg = x_avg + mix_weights[i + 1] * x
         x = norm(x_avg)
 
