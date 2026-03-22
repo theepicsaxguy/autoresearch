@@ -25,6 +25,20 @@
 - **Muon ns_steps=5 is essential** [HIGH]: ns_steps=3 loses gradient quality despite extra steps.
 - **Muon momentum 0.95 final is optimal** [MEDIUM]: 0.98 too high.
 
+## Architectural Dead Ends (exp210-222)
+- **Block weight sharing / recurrence is harmful** [HIGH]: 2 blocks × 4 loops = -0.036 bpb. 3 variants tested (exp220/221/222), all worse. Blocks need position-specific weights; the brain shares architecture, not weights.
+- **Any auxiliary loss through intermediate hiddens is too expensive** [HIGH]: FHSA, DFA, MTP all killed throughput (35-65% overhead). At 5-min budget, steps dominate — can't afford ANY extra backward paths.
+- **Weight-space ops fight Muon** [HIGH]: Hebbian normalization, any post-optimizer weight modification conflicts with Muon's orthogonalization.
+- **Non-SiLU gates are slower** [MEDIUM]: Sigmoid spike gate 14% slower than SiLU. Softmax gate 50% slower. Stick with SwiGLU.
+
+## Recent Positive Signal
+- **Deep layer averaging helps at near-zero cost** [MEDIUM]: `c799673` improved the clean baseline family from 1.189856 to 1.188223 with only 9 added scalars and no new expensive kernels. Some useful signal survives in earlier layers; a strict "last layer only" readout is slightly suboptimal.
+- **Attention is still the thing to preserve, but its allocation is still underexplored** [HIGH]: Replacing attention with SSMs was catastrophic, yet the code already carries a fake `WINDOW_PATTERN` knob. That makes real local/global attention by layer a high-value next test: preserve attention, change where the expensive global form is used.
+
+## Implementation Hazards
+- **Additive-mask local attention on compiled SDPA is untrusted** [HIGH]: `6f81055` produced impossible near-zero train loss and `val_bpb=0.000997` while also halving throughput. The broader idea of layerwise local/global attention remains interesting, but this specific masked implementation path is contaminated and should not be trusted.
+- **Hard winner-take-all after attention is structurally harmful** [HIGH]: `dd284f4` preserved most of baseline throughput yet regressed badly to `1.2325` bpb. This means the failure is representational, not just computational. Attention outputs need dense mixtures; forcing 1-of-4 competition after SDPA throws away useful combined features.
+
 ## Dead Ends
 - Parallel attn+MLP (PaLM-style): more steps but worse quality per step
 - Label smoothing: destroys loss signal, catastrophic regression
