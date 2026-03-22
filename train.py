@@ -148,9 +148,6 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
-        # Refinement pass scalars (exp220: reuse last block for settling)
-        self.refine_resid_lambda = nn.Parameter(torch.ones(1))
-        self.refine_x0_lambda = nn.Parameter(torch.zeros(1))
         # Value embeddings
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
@@ -186,8 +183,6 @@ class GPT(nn.Module):
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
-        self.refine_resid_lambda.fill_(1.0)
-        self.refine_x0_lambda.fill_(0.1)
         # Value embeddings
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
@@ -238,8 +233,6 @@ class GPT(nn.Module):
             + value_embeds_numel
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
-            + self.refine_resid_lambda.numel()
-            + self.refine_x0_lambda.numel()
         )
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
@@ -256,7 +249,7 @@ class GPT(nn.Module):
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.refine_resid_lambda.numel() + self.refine_x0_lambda.numel()
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel()
         total = wte + value_embeds + lm_head + transformer_matrices + scalars
         return {
             "wte": wte,
@@ -281,8 +274,8 @@ class GPT(nn.Module):
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        resid_params = [self.resid_lambdas, self.refine_resid_lambda]
-        x0_params = [self.x0_lambdas, self.refine_x0_lambda]
+        resid_params = [self.resid_lambdas]
+        x0_params = [self.x0_lambdas]
         assert len(list(self.parameters())) == (
             len(matrix_params)
             + len(embedding_params)
@@ -366,11 +359,6 @@ class GPT(nn.Module):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-        # Refinement: reuse last block for one settling pass (exp220)
-        i = len(self.transformer.h) - 1
-        x = self.refine_resid_lambda * x + self.refine_x0_lambda * x0
-        ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-        x = self.transformer.h[i](x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
         softcap = 15
@@ -588,7 +576,7 @@ WARMDOWN_RATIO = 0.9  # fraction of time budget for LR warmdown — push even mo
 FINAL_LR_FRAC = 0.05  # final LR as fraction of initial — keep learning at end
 
 # Model size
-DEPTH = 8  # exp221: 8 unique blocks + 1 reuse pass of last block = 9 total passes (settling)
+DEPTH = 8  # try deeper with full MHA (low VRAM footprint)
 DEVICE_BATCH_SIZE = 16  # per-device batch size — use more VRAM for activations
 
 # ---------------------------------------------------------------------------
