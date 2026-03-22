@@ -80,3 +80,6 @@
 | Hard competition in attention outputs | clean fail — only ~2% step loss, but +0.044 bpb regression; dense output blending matters | dd284f4 |
 | Depth-state workspace across layers | clean fail — slightly slower and +0.019 bpb worse; readout mixing helps, recurrent reinjection hurts | 96d1759 |
 | Predictive coding on deep-layer-mix baseline | clean fail, but closer than recent bold variants — some per-step fit benefit did not survive wall-clock budget | 43bc457 |
+| Low-rank predictive coding | near-miss discard — better than full-width predictive coding, but still loses on quality-per-second | cfbc49f |
+| Selective low-rank predictive coding | best recent near-miss — lower-half rank-8 version gets within +0.005 of best; family still alive | 8a9c362 |
+| Ultra-selective predictive coding | strongest recent near-miss — first-2-layer rank-8 version improves again and appears cost-limited | b2015f3 |
