@@ -25,3 +25,4 @@ metrics.jsonl
 run.log
 run_summary.json
 .auto-log-research/
+run_analysis.log

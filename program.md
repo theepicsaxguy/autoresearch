@@ -40,6 +40,79 @@ Be bold. If an experiment seems insane, it is probably more worth running than t
 
 ---
 
+## WHAT WE ARE ACTUALLY OPTIMIZING
+
+Do not optimize dense FLOPs. Optimize **useful state change per joule**.
+
+This program is not about shrinking a frontier dense model until it fits. That path bottoms out in a worse autocomplete engine. The target is to find computation that wastes far less work.
+
+Useful principles:
+
+- **Iterative refinement over one-shot depth.** If a model needs multiple internal passes to settle on the right answer, then "8 different blocks once" may be a worse use of parameters than "1-2 strong blocks reused several times." Reusing computation is not a concession. It may be the correct inductive bias.
+- **Credit assignment must be engineered, not worshipped.** End-to-end backprop stays, but if deep stacks learn badly under this budget then add local teaching signals. Early layers can receive direct semantic or predictive targets. Mid layers can learn reconstruction or latent prediction. Late layers answer to the task loss.
+- **Sparse activation beats tiny dense everything.** Hard competition, routing, and selective attention are not cosmetic efficiency tricks. They are how a larger effective system can fit inside a small inference budget.
+- **Fast state matters.** A small persistent working state that updates every token or chunk can substitute for a surprising amount of static parameter count.
+- **Memory retrieval should be part of the step.** Do not force the feedforward stack to memorize, search, and reason with the same mechanism if a tiny associative memory or inner retrieval loop can do part of that work cheaper.
+- **Measured throughput beats paper cost.** MACs are a hint. Wall clock, tokens/second, and validation quality per five-minute run are the actual metric.
+
+Interpret recent results through that lens:
+
+- The biggest gain came from fixing the attention implementation, not from adding sophistication. Reality beats theory when the kernel shape is wrong.
+- Predictive coding helped a little because it reallocated computation toward error, not because it added another dense branch.
+- The direct-feedback-alignment line was informative but not a win as implemented. It showed that credit assignment is a live lever, and it also showed how easy it is to contaminate evaluation or buy signal at unacceptable throughput cost. Treat that as a warning to design local losses carefully, not as permission to ignore the problem.
+
+Research direction, in order:
+
+### Stage 1: Hold the clean baseline
+
+Keep the current clean D8/256 line as the reference point. Do not let contaminated evals, speed regressions, or accidental architecture drift create fake wins.
+
+### Stage 2: Developmental local learning
+
+Test local losses that are:
+
+- stronger early in training
+- concentrated in lower or middle layers
+- explicitly disabled in evaluation
+- decayed toward zero later in training
+
+If local loss helps, it should help because it improves early representation formation, not because it permanently distorts the objective.
+
+### Stage 3: Iterative refinement
+
+Replace part of the unique stack with reused computation:
+
+- reuse the same block 2-4 inner steps
+- inject the original embedding or residual anchor each inner step
+- warm-start hidden state from the previous chunk when possible
+
+The hypothesis is that parameter reuse plus state reuse beats shallow one-pass feature extraction under a hard wall-clock budget.
+
+### Stage 4: Sparse competition
+
+Add hard top-k or winner-take-all competition where it can force specialization without destroying kernel efficiency. Prefer places where sparse selection can replace redundant dense channels, not add a second expensive path.
+
+### Stage 5: Fast state
+
+Give the model a small recurrent working memory per layer or per sequence. The goal is to let the model think in temporary state instead of trying to bake every transient computation into slow weights.
+
+### Stage 6: Structural plasticity
+
+Prune by use, not by magnitude alone. If pruning helps, consider a tiny regrowth budget tied to consistent co-activation. Development matters more than static architecture drawings.
+
+### Stage 7: Mixed objectives with discipline
+
+If pure token CE is too weak, add objectives that shape internal world models rather than just asking for more logits:
+
+- latent prediction
+- future hidden-state prediction
+- short rollout consistency
+- sequence-level feature matching
+
+Do not repeat the multi-token-prediction mistake of paying large throughput cost for an objective that mostly weakens the main gradient.
+
+---
+
 ## HARD CONSTRAINTS
 
 - Only modify `train.py`. Everything else is read-only.
