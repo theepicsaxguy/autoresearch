@@ -118,9 +118,6 @@ class MLP(nn.Module):
 
     def forward(self, x):
         h = F.silu(self.c_gate(x)) * self.c_fc(x)
-        # Hard competition: keep only the strongest neurons per token.
-        threshold = h.abs().topk(self.k, dim=-1, sorted=False).values.amin(dim=-1, keepdim=True)
-        h = h * (h.abs() >= threshold)
         return self.c_proj(h)
 
 
