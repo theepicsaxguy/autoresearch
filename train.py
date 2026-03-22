@@ -126,12 +126,16 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
+        # Predictive coding: factor easy linear transforms out before expensive compute.
+        self.predictor = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x, ve, cos_sin, window_size):
-        # Peri-LN: pre-norm + post-norm on each sublayer
-        x = x + norm(self.attn(norm(x), ve, cos_sin, window_size))
-        x = x + norm(self.mlp(norm(x)))
-        return x
+        pred = self.predictor(x)
+        error = x - pred
+        # Peri-LN stays inside the expensive correction path.
+        error = error + norm(self.attn(norm(error), ve, cos_sin, window_size))
+        error = error + norm(self.mlp(norm(error)))
+        return pred + error
 
 
 class GPT(nn.Module):
@@ -182,6 +186,7 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            torch.nn.init.zeros_(block.predictor.weight)
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)
         self.x0_lambdas.fill_(0.1)
