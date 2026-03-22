@@ -118,6 +118,9 @@ class MLP(nn.Module):
 
     def forward(self, x):
         h = F.silu(self.c_gate(x)) * self.c_fc(x)
+        # Hard competition: keep only the strongest neurons per token.
+        threshold = h.abs().topk(self.k, dim=-1, sorted=False).values.amin(dim=-1, keepdim=True)
+        h = h * (h.abs() >= threshold)
         return self.c_proj(h)
 
 
@@ -142,7 +145,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "h": nn.ModuleList([Block(config, i) for i in range(N_UNIQUE_BLOCKS)]),
+                "h": nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
             }
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -225,9 +228,8 @@ class GPT(nn.Module):
         return window_sizes
 
     def estimate_flops(self):
-        """Estimated FLOPs per token (forward + backward). Accounts for block reuse."""
+        """Estimated FLOPs per token (forward + backward)."""
         nparams = sum(p.numel() for p in self.parameters())
-        block_params = sum(p.numel() for p in self.transformer.h.parameters())
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
         nparams_exclude = (
             self.transformer.wte.weight.numel()
@@ -235,10 +237,6 @@ class GPT(nn.Module):
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
         )
-        # Block params are reused n_layer/n_physical_blocks times
-        reuse_factor = self.config.n_layer / len(self.transformer.h)
-        effective_block_flops = 6 * block_params * reuse_factor
-        non_block_flops = 6 * (nparams - nparams_exclude - block_params)
         h = self.config.n_head
         q = self.config.n_embd // self.config.n_head
         t = self.config.sequence_len
@@ -247,7 +245,7 @@ class GPT(nn.Module):
             window = window_size[0]
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
-        return int(effective_block_flops + non_block_flops) + attn_flops
+        return 6 * (nparams - nparams_exclude) + attn_flops
 
     def num_scaling_params(self):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
@@ -360,13 +358,10 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx)
         x = norm(x)
         x0 = x
-        # Cortical recurrence: cycle through N_UNIQUE_BLOCKS physical blocks
-        n_blocks = len(self.transformer.h)
-        for eff_i in range(self.config.n_layer):
-            block = self.transformer.h[eff_i % n_blocks]
-            x = self.resid_lambdas[eff_i] * x + self.x0_lambdas[eff_i] * x0
-            ve = self.value_embeds[str(eff_i)](idx) if str(eff_i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[eff_i])
+        for i, block in enumerate(self.transformer.h):
+            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
+            x = block(x, ve, cos_sin, self.window_sizes[i])
         x = norm(x)
 
         softcap = 15
@@ -584,8 +579,7 @@ WARMDOWN_RATIO = 0.9  # fraction of time budget for LR warmdown — push even mo
 FINAL_LR_FRAC = 0.05  # final LR as fraction of initial — keep learning at end
 
 # Model size
-DEPTH = 8  # effective depth (total forward passes through blocks)
-N_UNIQUE_BLOCKS = 2  # cortical recurrence: 2 physical blocks looped 4 times
+DEPTH = 8  # try deeper with full MHA (low VRAM footprint)
 DEVICE_BATCH_SIZE = 16  # per-device batch size — use more VRAM for activations
 
 # ---------------------------------------------------------------------------
