@@ -104,33 +104,6 @@ class CausalSelfAttention(nn.Module):
 
 
 SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
-USE_SSM = True  # Replace attention with selective state space model
-
-
-class SelectiveSSM(nn.Module):
-    """Input-dependent linear recurrence computed via parallel scan (cumsum trick).
-    Replaces O(n²) attention with O(n) recurrence. No QKV, no SDPA."""
-    def __init__(self, config, layer_idx):
-        super().__init__()
-        d = config.n_embd
-        self.decay = nn.Linear(d, d, bias=False)
-        self.input_gate = nn.Linear(d, d, bias=False)
-        self.output_gate = nn.Linear(d, d, bias=False)
-        self.c_proj = nn.Linear(d, d, bias=False)
-
-    def forward(self, x, ve, cos_sin, window_size):
-        a = torch.sigmoid(self.decay(x) + 3.0)  # init near 0.95 (long memory)
-        bx = self.input_gate(x) * x
-        # Parallel linear recurrence: h[t] = a[t]*h[t-1] + bx[t]
-        # Computed via cumsum trick with clamp for numerical stability
-        log_a = torch.log(a + 1e-6)
-        log_P = torch.cumsum(log_a, dim=1).clamp(min=-20.0)
-        P = torch.exp(log_P)
-        inv_P = torch.exp(-log_P)
-        h = P * torch.cumsum(bx * inv_P, dim=1)
-        # Output gating
-        c = torch.sigmoid(self.output_gate(x))
-        return self.c_proj(c * h)
 
 
 class MLP(nn.Module):
@@ -151,7 +124,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = SelectiveSSM(config, layer_idx) if USE_SSM else CausalSelfAttention(config, layer_idx)
+        self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size):
@@ -175,19 +148,16 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
-        # Value embeddings (only for attention — SSM doesn't use them)
+        # Value embeddings
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        if USE_SSM:
-            self.value_embeds = nn.ModuleDict()
-        else:
-            self.value_embeds = nn.ModuleDict(
-                {
-                    str(i): nn.Embedding(config.vocab_size, kv_dim)
-                    for i in range(config.n_layer)
-                    if has_ve(i, config.n_layer)
-                }
-            )
+        self.value_embeds = nn.ModuleDict(
+            {
+                str(i): nn.Embedding(config.vocab_size, kv_dim)
+                for i in range(config.n_layer)
+                if has_ve(i, config.n_layer)
+            }
+        )
         # Rotary embeddings
         self.rotary_seq_len = config.sequence_len * 10
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -203,16 +173,10 @@ class GPT(nn.Module):
         n_embd = self.config.n_embd
         s = 3**0.5 * n_embd**-0.5
         for block in self.transformer.h:
-            if USE_SSM:
-                torch.nn.init.uniform_(block.attn.decay.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.input_gate.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.output_gate.weight, -s, s)
-                torch.nn.init.zeros_(block.attn.c_proj.weight)
-            else:
-                torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-                torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-                torch.nn.init.zeros_(block.attn.c_proj.weight)
+            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
+            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
+            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
+            torch.nn.init.zeros_(block.attn.c_proj.weight)
             torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
@@ -223,10 +187,9 @@ class GPT(nn.Module):
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight, -s, s)
         # Gate weights init to zero (sigmoid(0)=0.5, scaled by 2 -> 1.0 = neutral)
-        if not USE_SSM:
-            for block in self.transformer.h:
-                if block.attn.ve_gate is not None:
-                    torch.nn.init.zeros_(block.attn.ve_gate.weight)
+        for block in self.transformer.h:
+            if block.attn.ve_gate is not None:
+                torch.nn.init.zeros_(block.attn.ve_gate.weight)
         # Rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
@@ -271,15 +234,14 @@ class GPT(nn.Module):
             + self.resid_lambdas.numel()
             + self.x0_lambdas.numel()
         )
+        h = self.config.n_head
+        q = self.config.n_embd // self.config.n_head
+        t = self.config.sequence_len
         attn_flops = 0
-        if not USE_SSM:
-            h = self.config.n_head
-            q = self.config.n_embd // self.config.n_head
-            t = self.config.sequence_len
-            for window_size in self.window_sizes:
-                window = window_size[0]
-                effective_seq = t if window < 0 else min(window, t)
-                attn_flops += 12 * h * q * effective_seq
+        for window_size in self.window_sizes:
+            window = window_size[0]
+            effective_seq = t if window < 0 else min(window, t)
+            attn_flops += 12 * h * q * effective_seq
         return 6 * (nparams - nparams_exclude) + attn_flops
 
     def num_scaling_params(self):
