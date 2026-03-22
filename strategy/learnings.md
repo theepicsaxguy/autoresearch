@@ -38,6 +38,8 @@
 ## Implementation Hazards
 - **Additive-mask local attention on compiled SDPA is untrusted** [HIGH]: `6f81055` produced impossible near-zero train loss and `val_bpb=0.000997` while also halving throughput. The broader idea of layerwise local/global attention remains interesting, but this specific masked implementation path is contaminated and should not be trusted.
 - **Hard winner-take-all after attention is structurally harmful** [HIGH]: `dd284f4` preserved most of baseline throughput yet regressed badly to `1.2325` bpb. This means the failure is representational, not just computational. Attention outputs need dense mixtures; forcing 1-of-4 competition after SDPA throws away useful combined features.
+- **Cross-depth workspace reinjection is harmful** [MEDIUM]: `96d1759` added a cheap learned EMA-style state across layers and fed it back into every block. It caused a modest throughput loss and a clear validation regression. Preserving earlier layers for final readout helps; repeatedly mixing a blended depth-state back into the stack does not.
+- **Predictive coding is not dead, but full-width predictors are too expensive here** [MEDIUM]: `43bc457` was a clean regression to `1.2015`, yet it was materially better than recent bold failures and showed slightly better raw late train loss than baseline. That hints the mechanism may help quality per update, but a full `d_model x d_model` predictor per block loses on quality-per-second under this 5-minute budget.
 
 ## Dead Ends
 - Parallel attn+MLP (PaLM-style): more steps but worse quality per step

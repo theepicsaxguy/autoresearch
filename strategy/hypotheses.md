@@ -78,3 +78,5 @@
 | Deep layer averaging | small clean WIN — near-zero-cost multi-scale blend improves baseline family | c799673 |
 | Real local attention via additive SDPA mask | invalid / contaminated — near-zero loss and bpb indicate broken causal path; also 50% throughput hit | 6f81055 |
 | Hard competition in attention outputs | clean fail — only ~2% step loss, but +0.044 bpb regression; dense output blending matters | dd284f4 |
+| Depth-state workspace across layers | clean fail — slightly slower and +0.019 bpb worse; readout mixing helps, recurrent reinjection hurts | 96d1759 |
+| Predictive coding on deep-layer-mix baseline | clean fail, but closer than recent bold variants — some per-step fit benefit did not survive wall-clock budget | 43bc457 |
