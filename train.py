@@ -57,6 +57,18 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
+def grouped_wta(x, group_size):
+    """Per-group winner-take-all over the last dim, preserving only the strongest feature."""
+    if group_size <= 1:
+        return x
+    *prefix, width = x.shape
+    assert width % group_size == 0
+    x_groups = x.view(*prefix, width // group_size, group_size)
+    winner_idx = x_groups.abs().argmax(dim=-1, keepdim=True)
+    winner_mask = torch.zeros_like(x_groups).scatter_(-1, winner_idx, 1.0)
+    return (x_groups * winner_mask).view(*prefix, width)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -98,12 +110,15 @@ class CausalSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+        y = y.transpose(1, 2)
+        y = grouped_wta(y, ATTN_COMPETE_GROUP)
+        y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
 
 SPARSE_K = 0.10  # fraction of MLP neurons active per token (sparse coding)
+ATTN_COMPETE_GROUP = 4  # per-head attention output competition: keep 1 winner out of each 4 features
 
 
 class MLP(nn.Module):
